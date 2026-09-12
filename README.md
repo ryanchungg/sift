@@ -1,105 +1,57 @@
-# Document Extraction API
+# Sift: Document Extraction API
 
-Async FastAPI service that accepts PDFs and a target JSON schema, extracts structured data with Google Gemini, and notifies clients when jobs finish. This repo ships scaffold, auth/rate-limits, the Gemini/Celery extraction worker, and HTTP routes for extract/jobs/usage.
+Async document extraction API that parses PDFs into user-defined JSON schemas using Google Gemini, Redis-backed task queues, and Supabase.
 
-## Stack
+## How to run
 
-- FastAPI (Python 3.12)
-- Supabase (PostgreSQL + Storage)
-- Redis + Celery
-- Google GenAI (`google-genai`)
-- Resend (email)
+1. Make `.env` file from `.env.example`
+2. Replace `.env` variables with actual keys (`GEMINI_API_KEY`, `SUPABASE_URL`, `SUPABASE_KEY`, `RESEND_API_KEY`)
+3. Run `scripts/init_db.sql` in your Supabase SQL editor to create tables
+4. Run `docker-compose up --build`
+5. Test endpoints at `http://localhost:8000/docs`
 
-## Project layout
+---
 
-```text
-app/
-  main.py                 # FastAPI entrypoint + /health
-  core/
-    config.py             # pydantic-settings (env vars)
-    database.py           # Supabase sync/async clients
-    redis.py              # async Redis client
-  middleware/
-    auth.py               # X-API-Key auth + RPM rate limit
-  services/
-    extractor.py          # Gemini PDF → validated JSON
-    email.py              # Resend completion emails
-    storage.py            # Supabase Storage PDF download
-  api/v1/
-    extract.py            # POST /extract
-    jobs.py               # GET /jobs/{job_id}
-    usage.py              # GET /usage
-    schemas.py            # response models
-    router.py             # aggregates v1 routes
-  workers/
-    celery_app.py         # Celery app
-    tasks.py              # process_extraction worker
-scripts/init_db.sql       # Supabase schema migration
-docker-compose.yml        # redis + api + worker
-Dockerfile
-requirements.txt
-```
+### Principles
 
-## Local setup
+1. **Try to make everything as cheap / free as possible**
+   - Use Gemini Flash on the free tier (native PDF parsing so we avoid paying for heavy OCR tools like AWS Textract).
+   - Use Gemini's structured outputs (`response_schema`) so we don't waste tokens on conversational fluff or formatting retries.
+   - Cache API key lookups in Redis so we don't spam Supabase database queries on every single incoming HTTP request.
+   - Per-key sliding window rate limiting in Redis to protect our free-tier Gemini API quota from getting drained.
 
-1. Copy environment defaults:
+2. **Learn software engineering**
+   - **Async Backend:** FastAPI for non-blocking I/O and automatic Swagger UI docs.
+   - **Distributed Task Queues:** Celery + Redis so long PDF extractions run in the background without freezing API requests or causing HTTP timeouts.
+   - **Databases & Storage:** Supabase (PostgreSQL) for jobs, usage logs, and API keys; Supabase Storage for temporary PDF uploads.
+   - **Docker:** Docker Compose to run Redis, the FastAPI web service, and the Celery worker all together with one command.
 
-   ```bash
-   cp .env.example .env
-   ```
+3. **Solve technical challenges**
+   - **Non-blocking API Design:** Return `status: "queued"` and a `job_id` immediately (<100ms) instead of making users wait 20s for Gemini to finish.
+   - **Dynamic JSON Validation:** Let users submit arbitrary JSON schemas and validate Gemini's output before marking the job as complete.
+   - **Usage Metering:** Track prompt tokens, completion tokens, and page counts per API key in PostgreSQL so usage can be monitored.
 
-   Fill in `SUPABASE_URL`, `SUPABASE_KEY` (or `SUPABASE_SERVICE_ROLE_KEY`), `GEMINI_API_KEY`, and `RESEND_API_KEY` when you wire real services.
+4. **Security**
+   - Never store raw API keys in the database: hash them with `SHA-256` and verify against key prefixes.
+   - Never commit `.env` or API credentials to GitHub.
+   - Return structured error responses without leaking internal stack traces.
+   - TODO: Configure Supabase Row Level Security (RLS) policies.
 
-2. Install dependencies (optional for non-Docker runs):
+---
 
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
-   ```
+### To-Dos
 
-3. Boot Redis, the API, and the Celery worker:
+#### Must-have
 
-   ```bash
-   docker compose up --build
-   ```
+1. Strict validation on user-provided JSON schemas using `jsonschema` before dispatching jobs.
+2. Auto-delete temporary PDFs from Supabase Storage once the extraction job is marked `COMPLETED` or `FAILED`.
+3. Handle edge cases for scanned/corrupted PDFs or empty files.
+4. Add basic unit tests with `pytest` (mocking Gemini API calls).
+5. Supabase Row Level Security (RLS) setup.
 
-4. Apply the database schema in the Supabase SQL editor (or `psql`):
+#### Nice to have
 
-   ```bash
-   # scripts/init_db.sql — clients, api_keys, extraction_jobs, usage_logs
-   ```
-
-5. Open [http://localhost:8000/health](http://localhost:8000/health) — you should see `{"status":"ok",...}`.
-   Interactive docs: [http://localhost:8000/docs](http://localhost:8000/docs).
-
-Protected `/api/v1/*` routes require an `X-API-Key` header. Keys are looked up in Redis (SHA-256 hash cache) with a Supabase `api_keys` fallback, then checked against a per-key Redis sliding-window RPM limit.
-
-### Run without Docker (API only)
-
-```bash
-# Redis must already be reachable at REDIS_URL
-uvicorn app.main:app --reload --port 8000
-celery -A app.workers.celery_app.celery_app worker --loglevel=info
-```
-
-## Environment variables
-
-| Variable | Purpose |
-| --- | --- |
-| `SUPABASE_URL` | Supabase project URL |
-| `SUPABASE_KEY` | Anon or primary API key |
-| `SUPABASE_SERVICE_ROLE_KEY` | Preferred server-side key when set |
-| `REDIS_URL` | Redis connection string |
-| `CELERY_BROKER_URL` | Celery broker (defaults to `REDIS_URL`) |
-| `CELERY_RESULT_BACKEND` | Celery backend (defaults to `REDIS_URL`) |
-| `GEMINI_API_KEY` | Google Gemini API key |
-| `RESEND_API_KEY` | Resend email API key |
-
-## Planned API surface
-
-- `POST /api/v1/extract` — enqueue extraction job
-- `GET /api/v1/jobs/{job_id}` — job status / result
-- `GET /api/v1/usage` — usage metrics
-- `POST /api/v1/keys` — API key provisioning
-- `GET /health` — health check (implemented)
+1. Webhook callbacks (`webhook_url`) as an alternative to email notifications.
+2. Simple frontend dashboard to upload PDFs and inspect extracted JSON side-by-side.
+3. Batch upload endpoint (`POST /api/v1/extract/batch`) for multiple files.
+4. Support image formats (`.png`, `.jpg`) in addition to PDFs.
