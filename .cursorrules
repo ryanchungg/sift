@@ -1,0 +1,22 @@
+# Cursor Rules for Document Extraction API
+
+## Code Style & Guidelines
+
+- Language: Python 3.11+
+- Framework: FastAPI with strict Pydantic v2 validation models.
+- Always use type annotations (typing module or standard Python 3.10+ union types).
+- Use async/await for all I/O-bound FastAPI endpoints and Supabase async client operations.
+- Worker: Use Celery with Redis broker/backend or ARQ. Keep worker tasks modular under app/workers/.
+
+## Gemini API Instructions
+
+- Use the official google-genai SDK.
+- For structured extraction, use Gemini's native structured outputs (response_mime_type="application/json" and pass response_schema or inject schema constraints into the prompt).
+- Pass PDF directly as MIME application/pdf to the multimodal endpoint without needing local OCR / Tesseract.
+
+## Error Handling & Security
+
+- Never expose internal stack traces to the API client; return structured HTTP 4xx/5xx errors.
+- Never store raw API keys; store hashes (hashlib.sha256) and look up by key prefix + hash verification.
+- Always validate JSON schemas passed by users using jsonschema before passing to Gemini.
+- Use environment variables via pydantic-settings (app/core/config.py).
